@@ -1,8 +1,15 @@
-pub struct State {}
+// https://tools.ietf.org/html/rfc793#section-3.2 [Page 22]
+pub enum State {
+    Closed,
+    Listen,
+    SynRcvd,
+    Estab,
+}
 
 impl Default for State {
     fn default() -> Self {
-        State {}
+        // Assumed that all ports all listening for now
+        State::Listen
     }
 }
 
