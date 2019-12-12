@@ -4,33 +4,23 @@ use std::io;
 use std::net::Ipv4Addr;
 
 // Protocol numbers https://en.wikipedia.org/wiki/List_of_IP_protocol_numbers
-const IPV4_PROTO: u16 = 0x800;
 const TCP_PROTO: u8 = 0x06;
-
-type EthernetFlags = u16;
-type EthernetProto = u16;
 
 mod tcp;
 
 #[derive(Clone, Copy, Debug, Hash, Eq, PartialEq)]
-struct Connection {
+struct Peers {
     src: (Ipv4Addr, u16),
     dst: (Ipv4Addr, u16),
 }
 
 fn main() -> io::Result<()> {
-    let mut connections: HashMap<Connection, tcp::State> = Default::default();
-    let iface = tun_tap::Iface::new("tun0", tun_tap::Mode::Tun)?;
+    let mut connections: HashMap<Peers, tcp::Connection> = Default::default();
+    let mut iface = tun_tap::Iface::without_packet_info("tun0", tun_tap::Mode::Tun)?;
     let mut buf = [0u8; 1504];
     loop {
         let nbytes = iface.recv(&mut buf[..])?;
-        let (_eth_flags, eth_proto) = parse_ethernet_headers(&mut buf);
-        if eth_proto != IPV4_PROTO {
-            // not ipv4, skip
-            continue;
-        }
-
-        match etherparse::Ipv4HeaderSlice::from_slice(&buf[4..nbytes]) {
+        match etherparse::Ipv4HeaderSlice::from_slice(&buf[..nbytes]) {
             Ok(iph) => {
                 let src = iph.source_addr();
                 let dst = iph.destination_addr();
@@ -39,16 +29,29 @@ fn main() -> io::Result<()> {
                     continue;
                 }
 
-                match etherparse::TcpHeaderSlice::from_slice(&buf[4 + iph.slice().len()..nbytes]) {
+                match etherparse::TcpHeaderSlice::from_slice(&buf[iph.slice().len()..nbytes]) {
                     Ok(tcph) => {
-                        let datai = 4 + iph.slice().len() + tcph.slice().len();
-                        connections
-                            .entry(Connection {
-                                src: (src, tcph.source_port()),
-                                dst: (dst, tcph.destination_port()),
-                            })
-                            .or_default()
-                            .on_packet(iph, tcph, &buf[datai..nbytes]);
+                        use std::collections::hash_map::Entry;
+                        let datai = iph.slice().len() + tcph.slice().len();
+                        match connections.entry(Peers {
+                            src: (src, tcph.source_port()),
+                            dst: (dst, tcph.destination_port()),
+                        }) {
+                            Entry::Occupied(mut e) => {
+                                let c = e.get_mut();
+                                c.on_packet(&mut iface, iph, tcph, &buf[datai..nbytes])?;
+                            }
+                            Entry::Vacant(e) => {
+                                if let Some(conn) = tcp::Connection::accept(
+                                    &mut iface,
+                                    iph,
+                                    tcph,
+                                    &buf[datai..nbytes],
+                                )? {
+                                    e.insert(conn);
+                                }
+                            }
+                        }
                     }
                     Err(e) => {
                         eprintln!("Parse error, ignoring tcp package: {:?}", e);
@@ -60,10 +63,4 @@ fn main() -> io::Result<()> {
             }
         }
     }
-}
-
-fn parse_ethernet_headers(buf: &mut [u8]) -> (EthernetFlags, EthernetProto) {
-    let flags = read_u16(&buf[0..2], ByteOrder::BigEndian).unwrap();
-    let proto = read_u16(&buf[2..4], ByteOrder::BigEndian).unwrap();
-    (flags, proto)
 }
