@@ -1,4 +1,3 @@
-use endianness::{read_u16, ByteOrder};
 use std::collections::HashMap;
 use std::io;
 use std::net::Ipv4Addr;
@@ -59,7 +58,7 @@ fn main() -> io::Result<()> {
                 }
             }
             Err(e) => {
-                eprintln!("Parse error, ipv4 ignoring package: {:?}", e);
+                //eprintln!("Parse error, ipv4 ignoring package: {:?}", e);
             }
         }
     }

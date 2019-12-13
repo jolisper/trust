@@ -138,8 +138,6 @@ impl Connection {
             .calc_checksum_ipv4(&ip, &[])
             .expect("failed to compute checksum");
 
-        eprintln!("got ip header:\n{:02X?}", iph);
-        eprintln!("got tcp header:\n{:02X?}", tcph);
         let unwritten = {
             let mut unwritten = &mut buf[..];
             ip.write(&mut unwritten)
@@ -149,11 +147,8 @@ impl Connection {
                 .expect("failed writing tcp header to buffer");
             unwritten.len()
         };
-        eprintln!("responding with {:02X?}", &buf[..buf.len() - unwritten]);
         iface.send(&buf[..unwritten])?;
         Ok(Some(conn))
-        /*
-         */
     }
 
     pub fn on_packet<'a>(
