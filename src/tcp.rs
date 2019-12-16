@@ -1,22 +1,16 @@
 // https://tools.ietf.org/html/rfc793#section-3.2 [Page 22]
 enum State {
-    Closed,
-    Listen,
+    // Closed,
+    // Listen,
     SynRcvd,
     Estab,
-}
-
-impl Default for State {
-    fn default() -> Self {
-        // Assumed that all ports all listening for now
-        State::Listen
-    }
 }
 
 pub struct Connection {
     state: State,
     send: SendSequenceSpace,
     recv: ReceiveSequenceSpace,
+    ip: etherparse::Ipv4Header,
 }
 
 /// States of the Send Sequence Space (RFC 793 S3.2 F4)
@@ -88,7 +82,7 @@ impl Connection {
         }
 
         let iss = 0;
-        let conn = Connection {
+        let mut conn = Connection {
             state: State::SynRcvd,
             send: SendSequenceSpace {
                 iss,
@@ -105,6 +99,23 @@ impl Connection {
                 wnd: tcph.window_size(),
                 up: false,
             },
+            ip: etherparse::Ipv4Header::new(
+                0,
+                TCP_TTL,
+                etherparse::IpTrafficClass::Tcp,
+                [
+                    iph.destination()[0],
+                    iph.destination()[1],
+                    iph.destination()[2],
+                    iph.destination()[3],
+                ],
+                [
+                    iph.source()[0],
+                    iph.source()[1],
+                    iph.source()[2],
+                    iph.source()[3],
+                ],
+            ),
         };
 
         // start to establishing a connection
@@ -117,30 +128,15 @@ impl Connection {
         syn_ack.acknowledgment_number = conn.recv.nxt;
         syn_ack.syn = true;
         syn_ack.ack = true;
-        let ip = etherparse::Ipv4Header::new(
-            syn_ack.header_len(),
-            TCP_TTL,
-            etherparse::IpTrafficClass::Tcp,
-            [
-                iph.destination()[0],
-                iph.destination()[1],
-                iph.destination()[2],
-                iph.destination()[3],
-            ],
-            [
-                iph.source()[0],
-                iph.source()[1],
-                iph.source()[2],
-                iph.source()[3],
-            ],
-        );
         syn_ack.checksum = syn_ack
-            .calc_checksum_ipv4(&ip, &[])
+            .calc_checksum_ipv4(&conn.ip, &[])
             .expect("failed to compute checksum");
+        conn.ip.set_payload_len((syn_ack.header_len() + 0) as usize);
 
         let unwritten = {
             let mut unwritten = &mut buf[..];
-            ip.write(&mut unwritten)
+            conn.ip
+                .write(&mut unwritten)
                 .expect("failed writing ip header to buffer");
             syn_ack
                 .write(&mut unwritten)
@@ -158,6 +154,35 @@ impl Connection {
         tcph: etherparse::TcpHeaderSlice<'a>,
         data: &'a [u8],
     ) -> std::io::Result<()> {
+        // A new acknowledgment (called an "acceptable ack"), is one for which
+        // the inequality below holds:
+        //
+        // SND.UNA < SEG.ACK =< SND.NXT
+        let ackn = tcph.acknowledgment_number();
+        if self.send.una < ackn {
+            // check is violated iff SND.NXT is between SND.UNA and SEG.ACK
+            if self.send.nxt >= self.send.una && self.send.nxt < ackn {
+                return Ok(());
+            }
+        } else {
+            // check is okay iff SND.NXT is between SND.UNA and SEG.ACK
+            if self.send.nxt >= ackn && self.send.nxt < self.send.una {
+            } else {
+                return Ok(());
+            }
+        }
+
+        if !(self.send.una < ackn && ackn <= self.send.nxt) {
+            return Ok(());
+        }
+        match self.state {
+            State::SynRcvd => {
+                // expect to get an ACK for out SYN
+            }
+            State::Estab => {
+                unimplemented!();
+            }
+        }
         Ok(())
     }
 }
