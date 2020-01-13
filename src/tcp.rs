@@ -156,7 +156,7 @@ impl Connection {
         tcph: etherparse::TcpHeaderSlice<'a>,
         data: &'a [u8],
     ) -> std::io::Result<()> {
-        // first, check that sequence numbers are valid (RFC 793 S3.3)
+        // first, check that sequence numbers are valid (RFC 793 S3.3 P24)
         //
         // ```
         // A new acknowledgment (called an "acceptable ack"), is one for which
@@ -168,7 +168,7 @@ impl Connection {
         if !is_between_wrapped(self.send.una, ackn, self.send.nxt.wrapping_add(1)) {
             return Ok(());
         }
-        // second, valid segment check:
+        // second, valid segment check (RFC 793 S3.3 P25)
         //
         // ```
         // A segment is judged to occupy a portion of valid receive sequence
@@ -179,18 +179,60 @@ impl Connection {
         // or
         //
         // RCV.NXT =< SEG.SEQ+SEG.LEN-1 < RCV.NXT+RCV.WND
+        //
+        // The first part of this test checks to see if the beginning of the
+        // segment falls in the window, the second part of the test checks to see
+        // if the end of the segment falls in the window;
         // ```
         let seqn = tcph.sequence_number();
-        if data.is_empty() && !tcph.syn() && !tcph.fin() {
-            // zero-length segment has separate rules for acceptance
+        //
+        //
+        // ```
+        // SEG.LEN = the number of octets occupied by the data in the segment
+        //      (counting SYN and FIN)
+        // ```
+        let mut slen = data.len() as u32;
+        if tcph.syn() {
+            slen += 1;
+        }
+        if tcph.fin() {
+            slen += 1;
         }
         let wend = self.recv.nxt.wrapping_add(self.recv.wnd as u32);
-        if !is_between_wrapped(self.recv.nxt.wrapping_sub(1), seqn, wend)
-            && !is_between_wrapped(
-                self.recv.nxt.wrapping_sub(1),
-                seqn + data.len() as u32 - 1,
-                wend,
-            )
+        // zero-length segment has separate rules for acceptance (RFC 793 S3.3 P26)
+        //
+        // ```
+        // Actually, it is a little more complicated than this.  Due to zero
+        // windows and zero length segments, we have four cases for the
+        // acceptability of an incoming segment:
+        //
+        //  Segment Receive  Test
+        //  Length  Window
+        //  ------- -------  -------------------------------------------
+        //
+        //      0       0     SEG.SEQ = RCV.NXT
+        //
+        //      0      >0     RCV.NXT =< SEG.SEQ < RCV.NXT+RCV.WND
+        //
+        //     >0       0     not acceptable
+        //
+        //     >0      >0     RCV.NXT =< SEG.SEQ < RCV.NXT+RCV.WND
+        //                 or RCV.NXT =< SEG.SEQ+SEG.LEN-1 < RCV.NXT+RCV.WND
+        //
+        // Note that when the receive window is zero no segments should be
+        // acceptable except ACK segments.
+        // ```
+        if slen == 0 {
+            if self.recv.wnd == 0 {
+                if seqn != self.recv.nxt {
+                    return Ok(());
+                }
+            } else if !is_between_wrapped(self.recv.nxt.wrapping_sub(1), seqn, wend) {
+                return Ok(());
+            }
+        } else if self.recv.wnd == 0
+            || (!is_between_wrapped(self.recv.nxt.wrapping_sub(1), seqn, wend)
+                && !is_between_wrapped(self.recv.nxt.wrapping_sub(1), seqn + slen - 1, wend))
         {
             return Ok(());
         }
@@ -198,7 +240,7 @@ impl Connection {
         match self.state {
             State::SynRcvd => {
                 // expect to get an ACK for our SYN
-                if tcph.ack() {
+                if !tcph.ack() {
                     return Ok(());
                 }
                 // must have ACKed our SYN, since we detected at least one acked byte, and we have
