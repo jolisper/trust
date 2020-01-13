@@ -131,7 +131,9 @@ impl Connection {
         syn_ack.checksum = syn_ack
             .calc_checksum_ipv4(&conn.ip, &[])
             .expect("failed to compute checksum");
-        conn.ip.set_payload_len((syn_ack.header_len() + 0) as usize);
+        conn.ip
+            .set_payload_len((syn_ack.header_len() + 0) as usize)
+            .expect("Error setting payload len");
 
         let unwritten = {
             let mut unwritten = &mut buf[..];
@@ -154,35 +156,150 @@ impl Connection {
         tcph: etherparse::TcpHeaderSlice<'a>,
         data: &'a [u8],
     ) -> std::io::Result<()> {
+        // first, check that sequence numbers are valid (RFC 793 S3.3)
+        //
+        // ```
         // A new acknowledgment (called an "acceptable ack"), is one for which
         // the inequality below holds:
         //
         // SND.UNA < SEG.ACK =< SND.NXT
+        // ```
         let ackn = tcph.acknowledgment_number();
-        if self.send.una < ackn {
-            // check is violated iff SND.NXT is between SND.UNA and SEG.ACK
-            if self.send.nxt >= self.send.una && self.send.nxt < ackn {
-                return Ok(());
-            }
-        } else {
-            // check is okay iff SND.NXT is between SND.UNA and SEG.ACK
-            if self.send.nxt >= ackn && self.send.nxt < self.send.una {
-            } else {
-                return Ok(());
-            }
-        }
-
-        if !(self.send.una < ackn && ackn <= self.send.nxt) {
+        if !is_between_wrapped(self.send.una, ackn, self.send.nxt.wrapping_add(1)) {
             return Ok(());
         }
+        // second, valid segment check:
+        //
+        // ```
+        // A segment is judged to occupy a portion of valid receive sequence
+        // space if
+        //
+        // RCV.NXT =< SEG.SEQ < RCV.NXT+RCV.WND
+        //
+        // or
+        //
+        // RCV.NXT =< SEG.SEQ+SEG.LEN-1 < RCV.NXT+RCV.WND
+        // ```
+        let seqn = tcph.sequence_number();
+        if data.is_empty() && !tcph.syn() && !tcph.fin() {
+            // zero-length segment has separate rules for acceptance
+        }
+        let wend = self.recv.nxt.wrapping_add(self.recv.wnd as u32);
+        if !is_between_wrapped(self.recv.nxt.wrapping_sub(1), seqn, wend)
+            && !is_between_wrapped(
+                self.recv.nxt.wrapping_sub(1),
+                seqn + data.len() as u32 - 1,
+                wend,
+            )
+        {
+            return Ok(());
+        }
+
         match self.state {
             State::SynRcvd => {
-                // expect to get an ACK for out SYN
+                // expect to get an ACK for our SYN
+                if tcph.ack() {
+                    return Ok(());
+                }
+                // must have ACKed our SYN, since we detected at least one acked byte, and we have
+                // only sent one byte (the SYN)
+                self.state = State::Estab;
             }
             State::Estab => {
                 unimplemented!();
             }
         }
         Ok(())
+    }
+}
+
+fn is_between_wrapped(start: u32, x: u32, end: u32) -> bool {
+    use std::cmp::Ordering;
+    match start.cmp(&x) {
+        Ordering::Equal => false,
+        Ordering::Less => {
+            // we have:
+            //
+            //     0 |-------------S------X-------------------| (wraparound)
+            //
+            // X is between S and E (S < X < E) in these cases:
+            //
+            //     0 |--------------S------X----E-------------| (wraparound)
+            //
+            //     0 |----------E---S------X------------------| (wraparound)
+            //
+            // but *not* in these cases
+            //
+            //     0 |----------S------E---X------------------| (wraparound)
+            //
+            //     0 |----------|----------X------------------| (wraparound)
+            //                  ^-S+E
+            //
+            //     0 |----------S----------|------------------| (wraparound)
+            //                         X+E-^
+            //
+            // or, in other words, iff !(S <= E <= X)
+            !(end >= start && end <= x)
+        }
+        Ordering::Greater => {
+            // we have the opposite of above:
+            //
+            //    0 |-------------X------S-------------------| (wraparound)
+            //
+            // X is between S and E (S < X < E) *only* in this case:
+            //
+            //    0 |--------------X-----E-----S-------------| (wraparound)
+            //
+            // but *not* in these cases
+            //
+            //    0 |------------X----S---E------------------| (wraparound)
+            //
+            //    0 |--------E---X----S----------------------| (wraparound)
+            //
+            //    0 |----------|----------S------------------| (wraparound)
+            //                 ^-X+E
+            //p
+            //    0 |----------X----------|------------------| (wraparound)
+            //                        S+E-^
+            //
+            // or, in other words, iff S < E < X
+            end < start && end > x
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn is_between_wrapped_test() {
+        std::char::from_u32(34);
+        // start == x, *not* in between
+        assert!(!is_between_wrapped(10, 10, 11));
+
+        // start < x:
+        // S---X---E
+        assert!(is_between_wrapped(10, 11, 12));
+        // E---S---X
+        assert!(is_between_wrapped(10, 11, 9));
+        // S---E---X
+        assert!(!is_between_wrapped(10, 12, 11));
+        // S+E---X
+        assert!(!is_between_wrapped(10, 11, 10));
+        // S---X+E
+        assert!(!is_between_wrapped(10, 11, 11));
+
+        // x < start:
+        // only valid case
+        assert!(is_between_wrapped(10, 8, 9));
+        // X---S---E
+        assert!(!is_between_wrapped(10, 9, 11));
+        // E---X---S
+        assert!(!is_between_wrapped(10, 9, 8));
+        // x+E---S
+        assert!(!is_between_wrapped(10, 9, 9));
+        // X---S+E
+        assert!(!is_between_wrapped(9, 10, 9));
     }
 }
