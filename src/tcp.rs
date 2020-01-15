@@ -1,9 +1,20 @@
+use std::fmt;
+
 // https://tools.ietf.org/html/rfc793#section-3.2 [Page 22]
 enum State {
     // Closed,
     // Listen,
     SynRcvd,
     Estab,
+}
+
+impl fmt::Display for State {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::result::Result<(), std::fmt::Error> {
+        match *self {
+            State::SynRcvd => write!(f, "SynRcvd"),
+            State::Estab => write!(f, "Estab"),
+        }
+    }
 }
 
 pub struct Connection {
@@ -222,6 +233,19 @@ impl Connection {
         // Note that when the receive window is zero no segments should be
         // acceptable except ACK segments.
         // ```
+        println!(
+            "DPORT={}, STATE={}, SYN={}, ACK={}, FIN={}, SEG.LEN={}, RCV.NXT={}, SEG.SEC={}, WEND={}, RCV.WND={}",
+            tcph.destination_port(),
+            self.state,
+            tcph.syn(),
+            tcph.ack(),
+            tcph.fin(),
+            slen,
+            self.recv.nxt.wrapping_sub(1),
+            seqn,
+            self.recv.wnd,
+            wend
+        );
         if slen == 0 {
             if self.recv.wnd == 0 {
                 if seqn != self.recv.nxt {
@@ -231,8 +255,8 @@ impl Connection {
                 return Ok(());
             }
         } else if self.recv.wnd == 0
-            || (!is_between_wrapped(self.recv.nxt.wrapping_sub(1), seqn, wend)
-                && !is_between_wrapped(self.recv.nxt.wrapping_sub(1), seqn + slen - 1, wend))
+            || !(is_between_wrapped(self.recv.nxt.wrapping_sub(1), seqn, wend)
+                || is_between_wrapped(self.recv.nxt.wrapping_sub(1), seqn + slen - 1, wend))
         {
             return Ok(());
         }
