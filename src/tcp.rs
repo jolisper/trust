@@ -183,7 +183,7 @@ impl Connection {
         let payload_bytes = unwritten.write(payload)?;
         let unwritten = unwritten.len();
 
-        // Increment secuence number
+        // Increment sequence number
         self.send.nxt.wrapping_add(payload_bytes as u32);
         if self.tcp.syn {
             self.send.nxt = self.send.nxt.wrapping_add(1);
