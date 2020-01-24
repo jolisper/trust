@@ -243,8 +243,6 @@ impl Connection {
         // if the end of the segment falls in the window;
         // ```
         let seqn = tcph.sequence_number();
-        //
-        //
         // ```
         // SEG.LEN = the number of octets occupied by the data in the segment
         //      (counting SYN and FIN)
@@ -307,9 +305,17 @@ impl Connection {
         {
             return Ok(());
         }
-
+        // The next sequence number expected
         self.recv.nxt = seqn.wrapping_add(slen);
-        // TODO: make sure this gets acked
+
+        // TODO: if _not_ acceptable send ACK
+        // ```
+        // If an incoming segment is not acceptable, an acknowledgment
+        //     should be sent in reply (unless the RST bit is set, if so drop
+        //                              the segment and return):
+        //
+        // <SEQ=SND.NXT><ACK=RCV.NXT><CTL=ACK>
+        // ``
 
         // Second, valid sequence numbers check (RFC 793 S3.3 P24)
         //
@@ -327,6 +333,7 @@ impl Connection {
             }
             return Ok(());
         }
+        // the next byte is expect, the first byte unacknowledged
         self.send.una = ackn;
 
         match self.state {
