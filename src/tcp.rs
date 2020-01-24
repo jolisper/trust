@@ -307,7 +307,6 @@ impl Connection {
         }
         // The next sequence number expected
         self.recv.nxt = seqn.wrapping_add(slen);
-
         // TODO: if _not_ acceptable send ACK
         // ```
         // If an incoming segment is not acceptable, an acknowledgment
@@ -317,45 +316,37 @@ impl Connection {
         // <SEQ=SND.NXT><ACK=RCV.NXT><CTL=ACK>
         // ``
 
-        // Second, valid sequence numbers check (RFC 793 S3.3 P24)
-        //
-        // ```
-        // A new acknowledgment (called an "acceptable ack"), is one for which
-        // the inequality below holds:
-        //
-        // SND.UNA < SEG.ACK =< SND.NXT
-        // ```
-        let ackn = tcph.acknowledgment_number();
-        if !is_between_wrapped(self.send.una, ackn, self.send.nxt.wrapping_add(1)) {
-            if !self.state.is_synchronized() {
-                // according to Reset Generation, we should send a RST (RFC 793 S3.4 P36)
-                self.send_rst(iface);
-            }
+        if !tcph.ack() {
             return Ok(());
         }
-        // the next byte is expect, the first byte unacknowledged
-        self.send.una = ackn;
 
-        match self.state {
-            State::SynRcvd => {
-                // expect to get an ACK for our SYN
-                if !tcph.ack() {
-                    return Ok(());
-                }
+        let ackn = tcph.acknowledgment_number();
+        if let State::SynRcvd = self.state {
+            if !is_between_wrapped(self.send.una.wrapping_sub(1), ackn, self.send.nxt.wrapping_add(1)) {
                 // must have ACKed our SYN, since we detected at least one acked byte,
                 // and we have only sent one byte (the SYN).
                 self.state = State::Estab;
-
-                // now let's terminate the connection!
-                // TODO: needs tobe stored in the retransmission queue!
-                self.tcp.fin = true;
-                self.write(iface, &[]);
-
-                self.state = State::FinWait1;
+            } else {
+                // TODO: <SEQ=SEG.ACK><CTL=RST>
             }
-            State::Estab => {
-                unimplemented!();
+        }
+
+        if let State::Estab = self.state {
+            if !is_between_wrapped(self.send.una, ackn, self.send.nxt.wrapping_add(1)) {
+                return Ok(());
             }
+            // the next byte is expect, the first byte unacknowledged
+            self.send.una = ackn;
+            // TODO
+            assert!(data.is_empty());
+            // now let's terminate the connection!
+            // TODO: needs to be stored in the retransmission queue!
+            self.tcp.fin = true;
+            self.write(iface, &[]);
+            self.state = State::FinWait1;
+        }
+
+        match self.state {
             State::FinWait1 => {
                 if !tcph.fin() || !data.is_empty() {
                     unimplemented!();
@@ -365,9 +356,16 @@ impl Connection {
                 self.state = State::FinWait2;
             }
             State::FinWait2 => {
+                if !tcph.fin() || !data.is_empty() {
+                    unimplemented!();
+                }
+
                 self.tcp.fin = false;
                 self.write(iface, &[]);
-                self.state = State::TimeWait;
+                self.state = State::Closing;
+            }
+            State::Closing => {
+                unimplemented!();
             }
         }
         Ok(())
